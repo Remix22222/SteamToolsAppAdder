@@ -10,7 +10,6 @@ A Windows GUI application for installing games via SteamTools.
 ## ✨ Features
 
 - **⚡ One-Click Installation** - Fully automated process
-- **🎨 Modern Dark UI** - Smooth animations and intuitive interface
 - **📊 Real-time Progress** - Live activity log and status updates
 - **🔄 Auto Steam Restart** - Automatically closes and restarts Steam
 - **🔧 Admin Auto-Request** - Automatically requests required permissions
