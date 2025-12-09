@@ -30,7 +30,7 @@ A modern Windows application that makes installing games through SteamTools easy
 ### Step-by-Step:
 1. **Download** the .exe from Releases
 2. **Run** it (allow admin permissions if asked)
-3. **Type** a game name, App ID, or Steam URL
+3. **Type** a game name, App ID or Steam URL
 4. **Click** Install
 5. **Wait** for the process to complete
 
