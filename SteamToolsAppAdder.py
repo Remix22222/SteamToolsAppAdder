@@ -489,7 +489,10 @@ class SteamToolsInstaller:
         self.root.title("Steam Tools App Adder Made By Remix")
         self.root.geometry("600x600")
         self.root.resizable(False, False)
-
+        if Path("icon.ico").exists():
+            root.wm_iconbitmap("icon.ico")
+        else:
+            pass
         # Color scheme
         self.bg_color = "#1a1b26"
         self.card_color = "#24283b"
@@ -518,7 +521,6 @@ class SteamToolsInstaller:
         popup.grab_set()
         popup.resizable(False, False)
         popup.configure(bg=self.bg_color)
-
         popup_width = 600
         popup_height = 450
 
