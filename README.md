@@ -3,7 +3,7 @@
 [![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/RemixDev/SteamTools-App-Adder/releases)
 [![Steam Required](https://img.shields.io/badge/Steam-Required-black?style=for-the-badge&logo=steam&logoColor=white)](https://store.steampowered.com/)
 [![Status](https://img.shields.io/badge/Status-Stable-green?style=for-the-badge)](#)
-[![Downloads](https://img.shields.io/github/downloads/RemixDev/SteamTools-App-Adder/total?style=for-the-badge&color=success)](https://github.com/Remix22222/steamtoolsadder/releases/download/latest/SteamToolsAppAdder.exe)
+[![Downloads](https://img.shields.io/github/downloads/Remix22222/steamtoolsadder/total?style=for-the-badge&color=success)](https://github.com/Remix22222/steamtoolsadder/releases/download/latest/SteamToolsAppAdder.exe)
 
 A modern Windows application that makes installing games through SteamTools easy and fast. Just type a game name, click install, and let the automation do the rest.
 
