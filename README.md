@@ -9,7 +9,7 @@ A modern Windows application that makes installing games through SteamTools easy
 
 ## ✨ Features
 
-- **🔍 Smart Game Search** - Find games by name, App ID, or URL
+- **🔍 Smart Game Search** - Find games by name, App ID or URL
 - **⚡ One-Click Install** - Fully automated with progress tracking
 - **🎨 Clean Dark Theme** - Modern interface
 - **📊 Live Activity Log** - See what's happening in real-time
