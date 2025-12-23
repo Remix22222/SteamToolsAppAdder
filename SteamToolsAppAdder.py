@@ -593,7 +593,7 @@ class SteamToolsInstaller:
         def open_download_link():
             """Open SteamTools download link in browser."""
             webbrowser.open(
-                "https://store2.gofile.io/download/web/b1610f35-acac-453b-9677-505200f0eefc/st-setup-1.8.17r2.exe")
+                "https://steamtools.net/download")
             messagebox.showinfo("Download Started",
                                 "The download has been opened in your browser.\n\nAfter installation, please restart this application.")
             popup.destroy()
