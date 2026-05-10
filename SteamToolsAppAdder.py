@@ -150,7 +150,7 @@ class SteamToolsDownloader:
     def __init__(self):
         self.games_cache = {}
         self.base_url = "https://api.steampowered.com"
-        self.server_base_url = "https://walftech.com/proxy.php?url=https%3A%2F%2Fsteamgames554.s3.us-east-1.amazonaws.com%2F"
+        self.server_base_url = "https://codeload.github.com/SSMGAlt/ManifestHub2/zip/refs/heads/"
         self.steamtools_exe = self.find_steamtools_exe()
         self._steam_folder = None
         self.web_searcher = SteamWebSearch()
@@ -259,7 +259,7 @@ class SteamToolsDownloader:
             log_callback(f"[2/5] Downloading {app_id}.zip from server storage...")
 
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        url = f"{self.server_base_url}{app_id}.zip"
+        url = f"{self.server_base_url}{app_id}"
         zip_path = Path(output_dir) / f"{app_id}.zip"
 
         try:
