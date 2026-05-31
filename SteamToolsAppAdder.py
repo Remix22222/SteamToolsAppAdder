@@ -291,7 +291,7 @@ class SteamToolsDownloader:
             return False
 
         stplug_folder = steam_folder / 'config' / 'stplug-in'
-        depotcache_folder = steam_folder / 'depotcache'
+        depotcache_folder = steam_folder / 'config' / 'depotcache'
         stplug_folder.mkdir(parents=True, exist_ok=True)
         depotcache_folder.mkdir(parents=True, exist_ok=True)
 
