@@ -1,112 +1,117 @@
-import requests
-import zipfile
+import ctypes
+import os
+import re
 import shutil
 import subprocess
-import os
+import sys
+import threading
 import time
-import re
+import webbrowser
+import zipfile
 from difflib import get_close_matches
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import quote
+
+import requests
 import tkinter as tk
 from tkinter import ttk, messagebox
-import threading
-import sys
-import ctypes
-import webbrowser
-from urllib.parse import quote
-import io
 from bs4 import BeautifulSoup
-import http.client
-from typing import Optional, Tuple, List, Dict, Any
+
+# --- Constants ---
+MANIFEST_HUB_URL = "https://codeload.github.com/SSMGAlt/ManifestHub2/zip/refs/heads/{}"
+STEAM_API_APP_LIST = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
+STEAM_STORE_SEARCH = "https://store.steampowered.com/search/?term={}"
+STEAM_APP_DETAILS = "https://store.steampowered.com/api/appdetails?appids={}"
+
+APPID_URL_PATTERNS = [
+    r'/app/(\d+)',
+    r'app/(\d+)',
+    r'AppId=(\d+)',
+    r'id=(\d+)',
+]
+
+BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+}
+
+
+def resource_path(relative_path: str) -> str:
+    """Resolve path for both development and PyInstaller bundled environments."""
+    try:
+        base = sys._MEIPASS
+    except AttributeError:
+        base = os.path.abspath(".")
+    return os.path.join(base, relative_path)
 
 
 class SteamWebSearch:
     """Handles searching Steam store for games using web scraping."""
 
     def __init__(self):
-        self.search_cache = {}
+        self.search_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     def search_steam_store(self, query: str) -> List[Dict[str, Any]]:
-        """
-        Search Steam store for games by name.
+        """Search Steam store for games by name.
+
         Returns list of dicts with 'name', 'appid', and 'url' keys.
         """
         if query in self.search_cache:
             return self.search_cache[query]
 
         try:
-            # URL encode the query
-            encoded_query = quote(query)
-            url = f"https://store.steampowered.com/search/?term={encoded_query}"
-
-            # Set headers to mimic a browser
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-            }
-
-            response = requests.get(url, headers=headers, timeout=15)
+            url = STEAM_STORE_SEARCH.format(quote(query))
+            response = requests.get(url, headers=BROWSER_HEADERS, timeout=15)
             response.raise_for_status()
 
-            # Parse HTML
             soup = BeautifulSoup(response.content, 'html.parser')
-            results = []
+            results: List[Dict[str, Any]] = []
 
-            # Find all search result rows
-            search_result_rows = soup.find_all('a', {'data-ds-appid': True})
-
-            for row in search_result_rows[:10]:  # Limit to first 10 results
+            for row in soup.find_all('a', {'data-ds-appid': True})[:10]:
                 try:
-                    # Get appid from data attribute
                     appid = row.get('data-ds-appid', '').split(',')[0]
                     if not appid.isdigit():
                         continue
 
-                    # Get game name
                     title_span = row.find('span', class_='title')
                     if not title_span:
                         continue
 
-                    name = title_span.text.strip()
-
-                    # Get game URL
-                    href = row.get('href', '')
-
                     results.append({
-                        'name': name,
+                        'name': title_span.text.strip(),
                         'appid': int(appid),
-                        'url': href
+                        'url': row.get('href', ''),
                     })
-
                 except (AttributeError, ValueError, IndexError):
                     continue
 
-            # Alternative method if first method doesn't work
+            # Fallback: scan all links for /app/<id>/ patterns
             if not results:
-                # Look for app links directly
                 for link in soup.find_all('a', href=True):
                     href = link['href']
-                    app_match = re.search(r'/app/(\d+)/', href)
-                    if app_match:
-                        appid = app_match.group(1)
+                    match = re.search(r'/app/(\d+)/', href)
+                    if match:
+                        appid = match.group(1)
                         name = link.text.strip()
                         if name and appid.isdigit():
                             results.append({
-                                'name': name[:100] if name else f"App {appid}",
+                                'name': name[:100],
                                 'appid': int(appid),
-                                'url': href if href.startswith('http') else f'https://store.steampowered.com{href}'
+                                'url': href if href.startswith('http')
+                                       else f'https://store.steampowered.com{href}',
                             })
 
-            # Remove duplicates by appid
+            # Deduplicate by appid
+            seen: set = set()
             unique_results = []
-            seen_appids = set()
-            for result in results:
-                if result['appid'] not in seen_appids:
-                    unique_results.append(result)
-                    seen_appids.add(result['appid'])
+            for r in results:
+                if r['appid'] not in seen:
+                    unique_results.append(r)
+                    seen.add(r['appid'])
 
             self.search_cache[query] = unique_results
             return unique_results
@@ -118,251 +123,206 @@ class SteamWebSearch:
     def extract_appid_from_url(self, url: str) -> Optional[int]:
         """Extract App ID from any Steam URL."""
         try:
-            # Common Steam URL patterns
-            patterns = [
-                r'/app/(\d+)',  # Standard app URLs
-                r'app/(\d+)',  # Alternative format
-                r'AppId=(\d+)',  # Query parameter
-                r'id=(\d+)',  # Another query parameter
-            ]
-
-            for pattern in patterns:
+            for pattern in APPID_URL_PATTERNS:
                 match = re.search(pattern, url)
                 if match and match.group(1).isdigit():
                     return int(match.group(1))
-
-            return None
         except Exception as e:
             print(f"Error extracting App ID from URL: {e}")
-            return None
+        return None
 
 
 class SteamToolsDownloader:
     """Handles Steam game downloading and installation logic."""
 
-    def resource_path(relative_path):
-        try:
-            base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
-        return os.path.join(base_path, relative_path)
-
     def __init__(self):
-        self.games_cache = {}
-        self.base_url = "https://api.steampowered.com"
-        self.server_base_url = "https://codeload.github.com/SSMGAlt/ManifestHub2/zip/refs/heads/"
+        self.games_cache: Dict[str, int] = {}
         self.steamtools_exe = self.find_steamtools_exe()
-        self._steam_folder = None
+        self._steam_folder: Optional[Path] = None
         self.web_searcher = SteamWebSearch()
 
-    def find_steamtools_exe(self):
+    def find_steamtools_exe(self) -> Optional[Path]:
         """Find SteamTools executable in common installation paths."""
-        common_paths = [
+        search_roots = [
             Path.home() / "AppData" / "Local" / "SteamTools",
             Path.home() / "AppData" / "Roaming" / "SteamTools",
             Path("C:/Program Files/SteamTools"),
             Path("C:/Program Files (x86)/SteamTools"),
         ]
-
-        for base_path in common_paths:
-            if base_path.exists():
-                for exe_file in base_path.rglob("SteamTools.exe"):
-                    return exe_file
+        for root in search_roots:
+            if root.exists():
+                for exe in root.rglob("SteamTools.exe"):
+                    return exe
         return None
 
-    def get_app_list(self):
+    def get_app_list(self) -> Dict[str, int]:
         """Fetch and cache the full Steam app list."""
         if not self.games_cache:
             try:
-                url = f"{self.base_url}/ISteamApps/GetAppList/v2/"
-                response = requests.get(url, timeout=15)
+                response = requests.get(STEAM_API_APP_LIST, timeout=15)
                 apps = response.json()['applist']['apps']
                 self.games_cache = {app['name'].lower(): app['appid'] for app in apps}
             except Exception as e:
                 print(f"Error fetching app list: {e}")
         return self.games_cache
 
-    def find_steam_folder(self):
+    def find_steam_folder(self) -> Optional[Path]:
         """Find Steam installation folder automatically."""
         if self._steam_folder:
             return self._steam_folder
 
-        possible_paths = [
+        candidates = [
             Path(os.environ.get('PROGRAMFILES(X86)', 'C:\\Program Files (x86)')) / 'Steam',
             Path(os.environ.get('PROGRAMFILES', 'C:\\Program Files')) / 'Steam',
             Path('C:\\Program Files (x86)\\Steam'),
             Path('C:\\Program Files\\Steam'),
         ]
-
-        for steam_path in possible_paths:
-            if steam_path.exists():
-                self._steam_folder = steam_path
-                return self._steam_folder
+        for path in candidates:
+            if path.exists():
+                self._steam_folder = path
+                return path
         return None
 
-    def find_game(self, query):
-        """Find game by name, AppID, or URL with multiple search methods."""
-        # Check if it's a Steam URL
+    def find_game(self, query: str) -> Union[int, List[Dict[str, Any]], None]:
+        """Find a game by name, App ID, or Steam URL.
+
+        Returns:
+            int  — single App ID when the match is unambiguous
+            list — multiple candidates for user selection
+            None — no match found
+        """
         if 'store.steampowered.com' in query or 'steamcommunity.com' in query:
             appid = self.web_searcher.extract_appid_from_url(query)
             if appid:
                 return appid
 
-        # Check if it's a direct AppID
         if query.isdigit():
             return int(query)
 
-        # Try web search first
         web_results = self.web_searcher.search_steam_store(query)
         if web_results:
-            # Return first result for direct match, or list for selection
-            if len(web_results) == 1:
-                return web_results[0]['appid']
-            else:
-                # Return list of dicts for better display
-                return web_results
+            return web_results[0]['appid'] if len(web_results) == 1 else web_results
 
-        # Fallback to API search if web search fails
+        # API fallback with fuzzy matching
         games = self.get_app_list()
         if not games:
             return None
 
         query_lower = query.lower()
-
-        # Exact match
         if query_lower in games:
             return games[query_lower]
 
-        # Fuzzy match
         matches = get_close_matches(query_lower, games.keys(), n=5, cutoff=0.7)
         if matches:
-            # Convert to list of dicts for consistency
-            return [{'name': match, 'appid': games[match]} for match in matches]
+            return [{'name': m, 'appid': games[m]} for m in matches]
 
         return None
 
-    def get_app_details(self, app_id):
+    def get_app_details(self, app_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed app information from Steam Store API."""
-        url = f"https://store.steampowered.com/api/appdetails?appids={app_id}"
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(STEAM_APP_DETAILS.format(app_id), timeout=10)
             data = response.json()
-            if str(app_id) in data and data[str(app_id)]['success']:
-                return data[str(app_id)]['data']
+            entry = data.get(str(app_id), {})
+            if entry.get('success'):
+                return entry['data']
         except Exception as e:
             print(f"Error fetching app details: {e}")
         return None
 
-    def download_appid_zip(self, app_id, output_dir="downloads", log_callback=None):
-        """Download and extract game data from server storage."""
-        if log_callback:
-            log_callback(f"[2/5] Downloading {app_id}.zip from server storage...")
+    def download_appid_zip(self, app_id: int, output_dir: str = "downloads",
+                           log_callback=None) -> bool:
+        """Download and extract game data from ManifestHub2."""
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
 
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        url = f"{self.server_base_url}{app_id}"
-        zip_path = Path(output_dir) / f"{app_id}.zip"
+        log(f"[2/5] Downloading {app_id}.zip from server storage...")
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        zip_path = output_path / f"{app_id}.zip"
 
         try:
-            response = requests.get(url, timeout=30, stream=True)
+            response = requests.get(MANIFEST_HUB_URL.format(app_id), timeout=30, stream=True)
             if response.status_code == 404:
-                if log_callback:
-                    log_callback(f"No data found for App ID {app_id}")
+                log(f"No data found for App ID {app_id}")
                 return False
-
             response.raise_for_status()
 
-            # Download file
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-            if log_callback:
-                log_callback(f"Downloaded: {zip_path.name}")
-                log_callback(f"Extracting...")
+            log(f"Downloaded: {zip_path.name}")
+            log("Extracting...")
 
-            # Extract archive
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(output_dir)
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(output_dir)
 
-            if log_callback:
-                log_callback(f"Extracted successfully")
-
-            # Clean up zip file
+            log("Extracted successfully")
             zip_path.unlink()
             return True
 
         except Exception as e:
-            if log_callback:
-                log_callback(f"Error during download/extraction: {e}")
+            log(f"Error during download/extraction: {e}")
             return False
 
-    def copy_files_to_steam(self, source_dir="downloads", log_callback=None):
-        """Copy lua, .st files to stplug-in and manifest files to depotcache."""
-        source_path = Path(source_dir)
-        lua_files = list(source_path.rglob("*.lua"))
-        manifest_files = list(source_path.rglob("*.manifest"))
-        st_files = list(source_path.rglob("*.st"))
-
-        if not lua_files and not manifest_files and not st_files:
+    def copy_files_to_steam(self, source_dir: str = "downloads", log_callback=None) -> bool:
+        """Copy .lua/.st files to stplug-in and .manifest files to depotcache."""
+        def log(msg):
             if log_callback:
-                log_callback("No files found to copy.")
+                log_callback(msg)
+
+        source = Path(source_dir)
+        lua_files = list(source.rglob("*.lua"))
+        st_files = list(source.rglob("*.st"))
+        manifest_files = list(source.rglob("*.manifest"))
+
+        if not lua_files and not st_files and not manifest_files:
+            log("No files found to copy.")
             return False
 
-        if log_callback:
-            log_callback(f"\n[3/5] Copying files to Steam...")
+        log("\n[3/5] Copying files to Steam...")
 
         steam_folder = self.find_steam_folder()
         if not steam_folder:
-            if log_callback:
-                log_callback("\nCould not find Steam installation.")
+            log("\nCould not find Steam installation.")
             return False
 
         stplug_folder = steam_folder / 'config' / 'stplug-in'
         depotcache_folder = steam_folder / 'depotcache'
-
         stplug_folder.mkdir(parents=True, exist_ok=True)
         depotcache_folder.mkdir(parents=True, exist_ok=True)
 
-        # Copy plugin files
-        files_to_copy = lua_files + st_files
-        if files_to_copy:
-            if log_callback:
-                log_callback(f"\nCopying plugin file(s) to config/stplug-in...")
-            for file_path in files_to_copy:
+        plugin_files = lua_files + st_files
+        if plugin_files:
+            log("\nCopying plugin file(s) to config/stplug-in...")
+            for fp in plugin_files:
                 try:
-                    dest_path = stplug_folder / file_path.name
-                    shutil.copy2(file_path, dest_path)
+                    shutil.copy2(fp, stplug_folder / fp.name)
                 except Exception as e:
-                    if log_callback:
-                        log_callback(f"  ✗ Failed: {e}")
+                    log(f"  ✗ Failed: {e}")
 
-        # Copy manifest files
         if manifest_files:
-            if log_callback:
-                log_callback(f"\nCopying manifest file(s) to depotcache...")
-            for file_path in manifest_files:
+            log("\nCopying manifest file(s) to depotcache...")
+            for fp in manifest_files:
                 try:
-                    dest_path = depotcache_folder / file_path.name
-                    shutil.copy2(file_path, dest_path)
+                    shutil.copy2(fp, depotcache_folder / fp.name)
                 except Exception as e:
-                    if log_callback:
-                        log_callback(f"  ✗ Failed: {e}")
+                    log(f"  ✗ Failed: {e}")
 
-        # Clean up temporary files
-        if log_callback:
-            log_callback(f"\n[4/5] Cleaning up...")
+        log("\n[4/5] Cleaning up...")
         try:
-            shutil.rmtree(source_path)
-            if log_callback:
-                log_callback(f"✓ Deleted temporary files")
+            shutil.rmtree(source)
+            log("✓ Deleted temporary files")
         except Exception as e:
-            if log_callback:
-                log_callback(f"⚠ Could not delete downloads folder: {e}")
+            log(f"⚠ Could not delete downloads folder: {e}")
 
         return True
 
-    def close_steam(self, log_callback=None):
-        """Close Steam completely."""
+    def close_steam(self, log_callback=None) -> bool:
+        """Force-close Steam."""
         try:
             subprocess.run(['taskkill', '/F', '/IM', 'steam.exe'],
                            capture_output=True, timeout=10)
@@ -375,8 +335,8 @@ class SteamToolsDownloader:
                 log_callback(f"⚠ Could not close Steam: {e}")
             return False
 
-    def start_steam(self, log_callback=None):
-        """Start Steam."""
+    def start_steam(self, log_callback=None) -> bool:
+        """Launch Steam."""
         steam_folder = self.find_steam_folder()
         if not steam_folder:
             return False
@@ -396,8 +356,8 @@ class SteamToolsDownloader:
                 log_callback(f"⚠ Could not start Steam: {e}")
             return False
 
-    def launch_steamtools(self, log_callback=None):
-        """Launch SteamTools."""
+    def launch_steamtools(self, log_callback=None) -> bool:
+        """Launch SteamTools.exe."""
         if not self.steamtools_exe:
             self.steamtools_exe = self.find_steamtools_exe()
 
@@ -419,7 +379,7 @@ class SteamToolsDownloader:
 
 
 class ModernButton(tk.Canvas):
-    """Custom styled button with hover effects."""
+    """Custom styled button with hover effects and rounded corners."""
 
     def __init__(self, parent, text, command, **kwargs):
         super().__init__(parent, highlightthickness=0, **kwargs)
@@ -441,47 +401,44 @@ class ModernButton(tk.Canvas):
 
         self.draw()
 
-    def configure_state(self, enabled):
+    def configure_state(self, enabled: bool):
         """Enable or disable the button."""
         self.is_enabled = enabled
-        if enabled:
-            self.itemconfig(self.rect, fill=self.bg_normal)
-        else:
-            self.itemconfig(self.rect, fill="#6c757d")
+        fill = self.bg_normal if enabled else "#6c757d"
+        self.itemconfig(self.rect, fill=fill)
 
     def draw(self):
         """Draw the button with rounded corners."""
         self.delete("all")
-        width = self.winfo_reqwidth()
-        height = self.winfo_reqheight()
-
-        self.rect = self.create_rounded_rect(0, 0, width, height, 10,
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        self.rect = self.create_rounded_rect(0, 0, w, h, 10,
                                              fill=self.bg_normal, outline="")
-        self.text_id = self.create_text(width // 2, height // 2, text=self.text,
-                                        fill=self.fg_color, font=("Segoe UI", 11, "bold"))
+        self.text_id = self.create_text(w // 2, h // 2, text=self.text,
+                                        fill=self.fg_color,
+                                        font=("Segoe UI", 11, "bold"))
 
     def create_rounded_rect(self, x1, y1, x2, y2, radius, **kwargs):
-        """Create a rounded rectangle polygon."""
-        points = [x1 + radius, y1, x2 - radius, y1, x2, y1, x2, y1 + radius,
-                  x2, y2 - radius, x2, y2, x2 - radius, y2, x1 + radius, y2,
-                  x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1]
+        """Create a rounded rectangle using a smooth polygon."""
+        points = [
+            x1 + radius, y1, x2 - radius, y1, x2, y1,
+            x2, y1 + radius, x2, y2 - radius, x2, y2,
+            x2 - radius, y2, x1 + radius, y2, x1, y2,
+            x1, y2 - radius, x1, y1 + radius, x1, y1,
+        ]
         return self.create_polygon(points, smooth=True, **kwargs)
 
-    def on_enter(self, e):
-        """Handle mouse enter event."""
+    def on_enter(self, _):
         if self.is_enabled:
             self.itemconfig(self.rect, fill=self.bg_hover)
 
-    def on_leave(self, e):
-        """Handle mouse leave event."""
+    def on_leave(self, _):
         if self.is_enabled:
             self.itemconfig(self.rect, fill=self.bg_normal)
 
-    def on_click(self, e):
-        """Handle mouse click event."""
+    def on_click(self, _):
         if not self.is_enabled:
             return
-
         self.itemconfig(self.rect, fill=self.bg_active)
         self.after(100, lambda: self.itemconfig(self.rect, fill=self.bg_hover))
         if self.command:
@@ -491,289 +448,220 @@ class ModernButton(tk.Canvas):
 class SteamToolsInstaller:
     """Main GUI application for Steam Tools installation."""
 
-    def __init__(self, root):
+    BG = "#1a1b26"
+    CARD = "#24283b"
+    TEXT = "#c0caf5"
+    ACCENT = "#5c7cfa"
+
+    def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Steam Tools App Adder Made By Remix")
         self.root.geometry("600x600")
         self.root.resizable(False, False)
-        def resource_path(relative_path):
-            try:
-                base_path = sys._MEIPASS
-            except Exception:
-                base_path = os.path.abspath(".")
-            return os.path.join(base_path, relative_path)
-        if Path("icon.ico").exists():
-            root.wm_iconbitmap("icon.ico")
-        elif Path(resource_path("icon.ico")).exists():
-            try:
-                root.wm_iconbitmap(resource_path("icon.ico"))
-            except:
-                pass
-        # Color scheme
-        self.bg_color = "#1a1b26"
-        self.card_color = "#24283b"
-        self.text_color = "#c0caf5"
-        self.accent_color = "#5c7cfa"
+        self.root.configure(bg=self.BG)
 
-        self.root.configure(bg=self.bg_color)
+        icon = Path("icon.ico")
+        bundled_icon = Path(resource_path("icon.ico"))
+        if icon.exists():
+            root.wm_iconbitmap(str(icon))
+        elif bundled_icon.exists():
+            try:
+                root.wm_iconbitmap(str(bundled_icon))
+            except Exception:
+                pass
 
         self.downloader = SteamToolsDownloader()
         self.is_processing = False
-        self.selection_popup = None  # Track the selection popup
+        self.selection_popup: Optional[tk.Toplevel] = None
 
         self.create_widgets()
 
-        # Check if SteamTools is installed
         if not self.downloader.steamtools_exe:
             self.install_btn.configure_state(False)
             self.update_status("ERROR: SteamTools not found.")
             self.show_steamtools_missing_dialog()
 
     def show_steamtools_missing_dialog(self):
-        """Display dialog when SteamTools is not found."""
+        """Display dialog when SteamTools.exe is not found."""
         popup = tk.Toplevel(self.root)
         popup.title("SteamTools Not Found")
         popup.transient(self.root)
         popup.grab_set()
         popup.resizable(False, False)
-        popup.configure(bg=self.bg_color)
-        popup_width = 600
-        popup_height = 450
+        popup.configure(bg=self.BG)
 
-        # Center popup on screen
-        screen_x = self.root.winfo_screenwidth()
-        screen_y = self.root.winfo_screenheight()
-        center_x = (screen_x - popup_width) // 2
-        center_y = (screen_y - popup_height) // 2
-        popup.geometry(f"{popup_width}x{popup_height}+{center_x}+{center_y}")
+        popup_w, popup_h = 600, 450
+        sx = self.root.winfo_screenwidth()
+        sy = self.root.winfo_screenheight()
+        popup.geometry(f"{popup_w}x{popup_h}+{(sx - popup_w) // 2}+{(sy - popup_h) // 2}")
 
-        # Main container
-        main_frame = tk.Frame(popup, bg=self.bg_color)
+        main_frame = tk.Frame(popup, bg=self.BG)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Header
-        header_frame = tk.Frame(main_frame, bg="#ff6b6b", height=100)
-        header_frame.pack(fill=tk.X)
-        header_frame.pack_propagate(False)
+        header = tk.Frame(main_frame, bg="#ff6b6b", height=100)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(header, text="⚠️  SteamTools Not Found",
+                 font=("Segoe UI", 18, "bold"), fg="#ffffff", bg="#ff6b6b").pack(pady=(25, 10))
+        tk.Label(header, text="Required component missing",
+                 font=("Segoe UI", 10), fg="#ffe0e0", bg="#ff6b6b").pack(pady=(0, 15))
 
-        title = tk.Label(header_frame, text="⚠️  SteamTools Not Found",
-                         font=("Segoe UI", 18, "bold"),
-                         fg="#ffffff", bg="#ff6b6b")
-        title.pack(pady=(25, 10))
+        content = tk.Frame(main_frame, bg=self.BG)
+        content.pack(fill=tk.BOTH, expand=True, padx=40, pady=35)
+        tk.Label(content, text="\U0001f4e5", font=("Segoe UI", 48), bg=self.BG).pack(pady=(0, 20))
+        tk.Label(content,
+                 text="SteamTools.exe is required to use this application.\n"
+                      "Please download and install it first,\n"
+                      "then restart this application.",
+                 font=("Segoe UI", 11), fg=self.TEXT, bg=self.BG,
+                 justify=tk.CENTER, wraplength=450).pack(pady=(0, 35))
 
-        subtitle = tk.Label(header_frame, text="Required component missing",
-                            font=("Segoe UI", 10),
-                            fg="#ffe0e0", bg="#ff6b6b")
-        subtitle.pack(pady=(0, 15))
+        btn_frame = tk.Frame(content, bg=self.BG)
+        btn_frame.pack(fill=tk.X)
 
-        # Content
-        content_frame = tk.Frame(main_frame, bg=self.bg_color)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=40, pady=35)
-
-        # Icon
-        icon_label = tk.Label(content_frame, text="📥",
-                              font=("Segoe UI", 48),
-                              bg=self.bg_color)
-        icon_label.pack(pady=(0, 20))
-
-        # Message
-        message = tk.Label(content_frame,
-                           text="SteamTools.exe is required to use this application.\n"
-                                "Please download and install it first,\n"
-                                "then restart this application.",
-                           font=("Segoe UI", 11),
-                           fg=self.text_color, bg=self.bg_color,
-                           justify=tk.CENTER, wraplength=450)
-        message.pack(pady=(0, 35))
-
-        # Buttons
-        button_frame = tk.Frame(content_frame, bg=self.bg_color)
-        button_frame.pack(fill=tk.X)
-
-        def open_download_link():
-            """Open SteamTools download link in browser."""
-            webbrowser.open(
-                "https://steamtools.net/download")
+        def open_download():
+            webbrowser.open("https://steamtools.net/download")
             messagebox.showinfo("Download Started",
-                                "The download has been opened in your browser.\n\nAfter installation, please restart this application.")
+                                "The download has been opened in your browser.\n\n"
+                                "After installation, please restart this application.")
             popup.destroy()
 
-        def on_close():
-            """Close the popup."""
-            popup.destroy()
-
-        # Create buttons with better sizing
-        download_btn = ModernButton(button_frame, "⬇️  Download SteamTools", open_download_link,
-                                    width=280, height=50, bg=self.bg_color)
-        download_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        close_btn = ModernButton(button_frame, "Close", on_close,
-                                 width=140, height=50, bg=self.bg_color)
-        close_btn.pack(side=tk.LEFT)
+        ModernButton(btn_frame, "⬇️  Download SteamTools", open_download,
+                     width=280, height=50, bg=self.BG).pack(side=tk.LEFT, padx=(0, 10))
+        ModernButton(btn_frame, "Close", popup.destroy,
+                     width=140, height=50, bg=self.BG).pack(side=tk.LEFT)
 
     def create_widgets(self):
-        """Create main application interface."""
-        main_frame = tk.Frame(self.root, bg=self.bg_color)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
+        """Build the main application interface."""
+        main = tk.Frame(self.root, bg=self.BG)
+        main.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
 
-        # Title
-        title = tk.Label(main_frame, text="Steam Tools App Adder",
-                         font=("Segoe UI", 24, "bold"),
-                         fg=self.text_color, bg=self.bg_color)
-        title.pack(pady=(0, 10))
-
-        subtitle = tk.Label(main_frame, text="Enter game name, App ID or Steam URL",
-                            font=("Segoe UI", 11),
-                            fg="#7982a9", bg=self.bg_color)
-        subtitle.pack(pady=(0, 5))
+        tk.Label(main, text="Steam Tools App Adder",
+                 font=("Segoe UI", 24, "bold"), fg=self.TEXT, bg=self.BG).pack(pady=(0, 10))
+        tk.Label(main, text="Enter game name, App ID or Steam URL",
+                 font=("Segoe UI", 11), fg="#7982a9", bg=self.BG).pack(pady=(0, 5))
 
         # Input card
-        input_card = tk.Frame(main_frame, bg=self.card_color)
+        input_card = tk.Frame(main, bg=self.CARD)
         input_card.pack(fill=tk.X, pady=(0, 20))
-
-        input_inner = tk.Frame(input_card, bg=self.card_color)
+        input_inner = tk.Frame(input_card, bg=self.CARD)
         input_inner.pack(padx=20, pady=20)
-
-        input_label = tk.Label(input_inner, text="Search for Game",
-                               font=("Segoe UI", 10),
-                               fg="#7982a9", bg=self.card_color)
-        input_label.pack(anchor="w", pady=(0, 8))
-
+        tk.Label(input_inner, text="Search for Game", font=("Segoe UI", 10),
+                 fg="#7982a9", bg=self.CARD).pack(anchor="w", pady=(0, 8))
         self.search_entry = tk.Entry(input_inner, font=("Segoe UI", 12),
-                                     bg="#414868", fg=self.text_color,
-                                     relief=tk.FLAT, insertbackground=self.text_color,
-                                     bd=0, highlightthickness=2,
-                                     highlightbackground="#414868",
-                                     highlightcolor=self.accent_color)
+                                     bg="#414868", fg=self.TEXT, relief=tk.FLAT,
+                                     insertbackground=self.TEXT, bd=0,
+                                     highlightthickness=2, highlightbackground="#414868",
+                                     highlightcolor=self.ACCENT)
         self.search_entry.pack(fill=tk.X, ipady=8, ipadx=10)
-        self.search_entry.bind("<Return>", lambda e: self.start_download())
+        self.search_entry.bind("<Return>", lambda _: self.start_download())
 
         # Install button
-        btn_frame = tk.Frame(main_frame, bg=self.bg_color)
+        btn_frame = tk.Frame(main, bg=self.BG)
         btn_frame.pack(pady=10)
-
         self.install_btn = ModernButton(btn_frame, "Search & Install", self.start_download,
-                                        width=200, height=50, bg=self.bg_color)
+                                        width=200, height=50, bg=self.BG)
         self.install_btn.pack()
 
         # Progress card
-        progress_card = tk.Frame(main_frame, bg=self.card_color)
-        progress_card.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
+        prog_card = tk.Frame(main, bg=self.CARD)
+        prog_card.pack(fill=tk.BOTH, expand=True)
+        prog_inner = tk.Frame(prog_card, bg=self.CARD)
+        prog_inner.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
 
-        progress_inner = tk.Frame(progress_card, bg=self.card_color)
-        progress_inner.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
-
-        self.status_label = tk.Label(progress_inner, text="Ready",
-                                     font=("Segoe UI", 11),
-                                     fg=self.text_color, bg=self.card_color,
-                                     anchor="w")
+        self.status_label = tk.Label(prog_inner, text="Ready", font=("Segoe UI", 11),
+                                     fg=self.TEXT, bg=self.CARD, anchor="w")
         self.status_label.pack(fill=tk.X, pady=(0, 10))
 
-        # Progress bar
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("Custom.Horizontal.TProgressbar",
-                        troughcolor='#414868',
-                        bordercolor=self.card_color,
-                        background=self.accent_color,
-                        lightcolor=self.accent_color,
-                        darkcolor=self.accent_color)
-
-        self.progress_bar = ttk.Progressbar(progress_inner, mode='indeterminate',
+                        troughcolor='#414868', bordercolor=self.CARD,
+                        background=self.ACCENT, lightcolor=self.ACCENT,
+                        darkcolor=self.ACCENT)
+        self.progress_bar = ttk.Progressbar(prog_inner, mode='indeterminate',
                                             style="Custom.Horizontal.TProgressbar")
         self.progress_bar.pack(fill=tk.X, pady=(0, 15))
 
-        # Activity log
-        log_label = tk.Label(progress_inner, text="Activity Log",
-                             font=("Segoe UI", 9, "bold"),
-                             fg="#7982a9", bg=self.card_color,
-                             anchor="w")
-        log_label.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(prog_inner, text="Activity Log", font=("Segoe UI", 9, "bold"),
+                 fg="#7982a9", bg=self.CARD, anchor="w").pack(fill=tk.X, pady=(0, 8))
 
-        log_frame = tk.Frame(progress_inner, bg="#414868", bd=0)
+        log_frame = tk.Frame(prog_inner, bg="#414868", bd=0)
         log_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.log_text = tk.Text(log_frame, font=("Consolas", 9),
-                                bg="#414868", fg="#a9b1d6",
+        self.log_text = tk.Text(log_frame, font=("Consolas", 9), bg="#414868", fg="#a9b1d6",
                                 relief=tk.FLAT, bd=0, padx=10, pady=10,
                                 height=8, wrap=tk.WORD, state=tk.DISABLED)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         scrollbar = tk.Scrollbar(log_frame, command=self.log_text.yview,
                                  bg="#414868", troughcolor="#414868",
                                  bd=0, highlightthickness=0)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=scrollbar.set)
 
-    def log(self, message):
-        """Append message to activity log."""
+    def log(self, message: str):
+        """Append a line to the activity log."""
         self.log_text.config(state=tk.NORMAL)
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
 
-    def update_status(self, status):
-        """Update the status label."""
+    def update_status(self, status: str):
+        """Update the status label text."""
         self.status_label.config(text=status)
 
     def start_download(self):
-        """Initialize the download process."""
+        """Validate input and kick off the search/install thread."""
         if self.is_processing:
             return
 
         if not self.downloader.steamtools_exe:
             messagebox.showerror("Missing Requirement",
-                                 "SteamTools.exe was not found. Please install SteamTools and restart.")
+                                 "SteamTools.exe was not found. "
+                                 "Please install SteamTools and restart.")
             return
 
         query = self.search_entry.get().strip()
         if not query:
-            messagebox.showwarning("Input Required", "Please enter a game name, App ID, or URL")
+            messagebox.showwarning("Input Required",
+                                   "Please enter a game name, App ID, or URL")
             return
 
         self.is_processing = True
         self.install_btn.configure_state(False)
         self.progress_bar.start(10)
 
-        # Clear log
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state=tk.DISABLED)
 
-        # Start search thread
-        thread = threading.Thread(target=self.initial_search_thread, args=(query,))
-        thread.daemon = True
-        thread.start()
+        t = threading.Thread(target=self.initial_search_thread, args=(query,), daemon=True)
+        t.start()
 
-    def initial_search_thread(self, query):
-        """Perform initial game search in background thread."""
+    def initial_search_thread(self, query: str):
+        """Background thread: resolve the query to an App ID."""
         try:
             self.root.after(0, lambda: self.update_status("Searching for game..."))
             self.root.after(0, lambda: self.log(f"Searching: {query}"))
 
-            app_match_result = self.downloader.find_game(query)
+            result = self.downloader.find_game(query)
 
-            if isinstance(app_match_result, int):
-                # Direct match found
-                self.root.after(0, lambda: self.download_thread_start(app_match_result))
-            elif isinstance(app_match_result, list) and app_match_result:
-                # Multiple matches found
-                self.root.after(0, lambda: self.show_match_selection(app_match_result, query))
+            if isinstance(result, int):
+                self.root.after(0, lambda: self.download_thread_start(result))
+            elif isinstance(result, list) and result:
+                self.root.after(0, lambda: self.show_match_selection(result, query))
             else:
-                # No match found
-                self.root.after(0, lambda: messagebox.showerror("Not Found",
-                                                                f"No game found for: {query}"))
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Not Found", f"No game found for: {query}"))
                 self.root.after(0, self.finish_processing)
 
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"Error during search: {str(e)}"))
-            self.root.after(0, lambda: messagebox.showerror("Error",
-                                                            f"An error occurred during search:\n{str(e)}"))
+            self.root.after(0, lambda: self.log(f"Error during search: {e}"))
+            self.root.after(0, lambda: messagebox.showerror(
+                "Error", f"An error occurred during search:\n{e}"))
             self.root.after(0, self.finish_processing)
 
-    def show_match_selection(self, matches, original_query):
-        """Display dialog for selecting from multiple game matches."""
-        # Close any existing selection popup
+    def show_match_selection(self, matches: List[Dict[str, Any]], original_query: str):
+        """Display a dialog for the user to pick from multiple game matches."""
         if self.selection_popup and self.selection_popup.winfo_exists():
             self.selection_popup.destroy()
 
@@ -783,272 +671,198 @@ class SteamToolsInstaller:
         popup.transient(self.root)
         popup.grab_set()
         popup.resizable(False, False)
-        popup.configure(bg=self.bg_color)
+        popup.configure(bg=self.BG)
 
-        # Set up window close handler
-        def on_popup_close():
-            """Handle popup window close event."""
-            if popup.winfo_exists():
-                popup.destroy()
-            self.root.after(0, self.finish_processing)
+        popup.protocol("WM_DELETE_WINDOW", lambda: (popup.destroy(),
+                                                     self.root.after(0, self.finish_processing)))
 
-        popup.protocol("WM_DELETE_WINDOW", on_popup_close)
-
-        popup_width = 550
-        popup_height = 500
-
-        # Center popup
-        screen_x = self.root.winfo_screenwidth()
-        screen_y = self.root.winfo_screenheight()
-        center_x = (screen_x - popup_width) // 2
-        center_y = (screen_y - popup_height) // 2
-        popup.geometry(f"{popup_width}x{popup_height}+{center_x}+{center_y}")
+        popup_w, popup_h = 550, 500
+        sx = self.root.winfo_screenwidth()
+        sy = self.root.winfo_screenheight()
+        popup.geometry(f"{popup_w}x{popup_h}+{(sx - popup_w) // 2}+{(sy - popup_h) // 2}")
 
         # Header
-        header_frame = tk.Frame(popup, bg="#5c7cfa", height=110)
-        header_frame.pack(fill=tk.X)
-        header_frame.pack_propagate(False)
-
-        title = tk.Label(header_frame, text="🔍  Found Similar Games",
-                         font=("Segoe UI", 17, "bold"),
-                         fg="#ffffff", bg="#5c7cfa")
-        title.pack(pady=(20, 8))
-
-        subtitle = tk.Label(header_frame,
-                            text=f"Multiple games matched '{original_query}'. Please select one:",
-                            font=("Segoe UI", 10),
-                            fg="#e0e0ff", bg="#5c7cfa")
-        subtitle.pack(pady=(0, 15))
+        header = tk.Frame(popup, bg=self.ACCENT, height=110)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(header, text="\U0001f50d  Found Similar Games",
+                 font=("Segoe UI", 17, "bold"), fg="#ffffff", bg=self.ACCENT).pack(pady=(20, 8))
+        tk.Label(header, text=f"Multiple games matched '{original_query}'. Please select one:",
+                 font=("Segoe UI", 10), fg="#e0e0ff", bg=self.ACCENT).pack(pady=(0, 15))
 
         # Content
-        content_frame = tk.Frame(popup, bg=self.bg_color)
-        content_frame.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
+        content = tk.Frame(popup, bg=self.BG)
+        content.pack(fill=tk.BOTH, expand=True, padx=30, pady=30)
+        tk.Label(content, text="Select a game:", font=("Segoe UI", 10, "bold"),
+                 fg="#7982a9", bg=self.BG).pack(anchor="w", pady=(0, 12))
 
-        list_label = tk.Label(content_frame, text="Select a game:",
-                              font=("Segoe UI", 10, "bold"),
-                              fg="#7982a9", bg=self.bg_color)
-        list_label.pack(anchor="w", pady=(0, 12))
+        list_frame = tk.Frame(content, bg="#414868", relief=tk.FLAT, bd=1)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 25))
 
-        # Listbox
-        listbox_frame = tk.Frame(content_frame, bg="#414868", relief=tk.FLAT, bd=1)
-        listbox_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 25))
+        listbox = tk.Listbox(list_frame, height=10, selectmode=tk.SINGLE,
+                             bg="#414868", fg=self.TEXT, relief=tk.FLAT, bd=0,
+                             selectbackground=self.ACCENT, font=("Segoe UI", 10),
+                             activestyle='none', highlightthickness=0)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        match_listbox = tk.Listbox(listbox_frame, height=10, selectmode=tk.SINGLE,
-                                   bg="#414868", fg=self.text_color, relief=tk.FLAT, bd=0,
-                                   selectbackground="#5c7cfa", font=("Segoe UI", 10),
-                                   activestyle='none', highlightthickness=0)
-        match_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=12, pady=12)
-
-        scrollbar = tk.Scrollbar(listbox_frame, command=match_listbox.yview,
+        scrollbar = tk.Scrollbar(list_frame, command=listbox.yview,
                                  bg="#414868", troughcolor="#414868",
                                  bd=0, highlightthickness=0)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=12)
-        match_listbox.config(yscrollcommand=scrollbar.set)
+        listbox.config(yscrollcommand=scrollbar.set)
 
-        # Populate listbox
-        for i, match in enumerate(matches):
+        for match in matches:
             if isinstance(match, dict):
                 name = match.get('name', 'Unknown')
                 appid = match.get('appid', 'N/A')
-                display_text = f"  {name[:45]} (App ID: {appid})"
             elif isinstance(match, tuple) and len(match) == 2:
                 name, appid = match
-                display_text = f"  {name[:45]} (App ID: {appid})"
             else:
-                display_text = f"  {str(match)[:50]}"
-            match_listbox.insert(tk.END, display_text)
+                name, appid = str(match), ''
+            listbox.insert(tk.END, f"  {name[:45]} (App ID: {appid})")
 
-        match_listbox.select_set(0)
+        listbox.select_set(0)
 
         def on_select():
-            """Handle game selection."""
-            try:
-                selection = match_listbox.curselection()
-                if selection:
-                    idx = selection[0]
-                    match = matches[idx]
-
-                    # Extract appid from different match formats
-                    if isinstance(match, dict):
-                        app_id = match.get('appid')
-                    elif isinstance(match, tuple) and len(match) == 2:
-                        app_id = match[1]  # (name, appid) format
-                    else:
-                        app_id = match  # assume it's already an appid
-
-                    if app_id:
-                        popup.destroy()
-                        self.download_thread_start(app_id)
-                        return
+            sel = listbox.curselection()
+            if not sel:
                 messagebox.showwarning("Selection Error", "Please select a game from the list.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Error during selection: {str(e)}")
+                return
+            match = matches[sel[0]]
+            if isinstance(match, dict):
+                app_id = match.get('appid')
+            elif isinstance(match, tuple) and len(match) == 2:
+                app_id = match[1]
+            else:
+                app_id = match
+            if app_id:
                 popup.destroy()
-                self.finish_processing()
+                self.download_thread_start(app_id)
 
         def on_cancel():
-            """Cancel selection and close popup."""
             popup.destroy()
             self.root.after(0, self.finish_processing)
 
         def on_try_again():
-            """Try again with a different search."""
             popup.destroy()
             self.root.after(0, self.finish_processing)
-            # Focus back to search entry for new input
             self.root.after(100, lambda: self.search_entry.focus_set())
             self.root.after(100, lambda: self.search_entry.select_range(0, tk.END))
 
-        # Buttons
-        button_frame = tk.Frame(content_frame, bg=self.bg_color)
-        button_frame.pack(fill=tk.X)
+        btn_frame = tk.Frame(content, bg=self.BG)
+        btn_frame.pack(fill=tk.X)
+        left = tk.Frame(btn_frame, bg=self.BG)
+        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        right = tk.Frame(btn_frame, bg=self.BG)
+        right.pack(side=tk.RIGHT)
 
-        # Left side buttons
-        left_button_frame = tk.Frame(button_frame, bg=self.bg_color)
-        left_button_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ModernButton(left, "✓  Confirm Selection", on_select,
+                     width=180, height=45, bg=self.BG).pack(side=tk.LEFT, padx=2)
+        ModernButton(right, "↻  Try Different Search", on_try_again,
+                     width=160, height=45, bg=self.BG).pack(side=tk.LEFT, padx=2)
+        ModernButton(right, "✕  Cancel", on_cancel,
+                     width=100, height=45, bg=self.BG).pack(side=tk.LEFT, padx=2)
 
-        # Right side buttons
-        right_button_frame = tk.Frame(button_frame, bg=self.bg_color)
-        right_button_frame.pack(side=tk.RIGHT)
-
-        ModernButton(left_button_frame, "✓  Confirm Selection", on_select,
-                     width=180, height=45, bg=self.bg_color).pack(side=tk.LEFT, padx=2)
-
-        ModernButton(right_button_frame, "↻  Try Different Search", on_try_again,
-                     width=160, height=45, bg=self.bg_color).pack(side=tk.LEFT, padx=2)
-
-        ModernButton(right_button_frame, "✕  Cancel", on_cancel,
-                     width=100, height=45, bg=self.bg_color).pack(side=tk.LEFT, padx=2)
-
-        # Bind Enter key to confirm selection
-        match_listbox.bind("<Double-Button-1>", lambda e: on_select())
-        match_listbox.bind("<Return>", lambda e: on_select())
+        listbox.bind("<Double-Button-1>", lambda _: on_select())
+        listbox.bind("<Return>", lambda _: on_select())
 
         self.root.wait_window(popup)
 
-    def download_thread_start(self, app_id):
-        """Start the download process in a new thread."""
+    def download_thread_start(self, app_id: int):
+        """Spawn the download/install worker thread."""
         self.root.after(0, lambda: self.log(f"Selected App ID: {app_id}"))
-        thread = threading.Thread(target=self.download_thread, args=(app_id,))
-        thread.daemon = True
-        thread.start()
+        t = threading.Thread(target=self.download_thread, args=(app_id,), daemon=True)
+        t.start()
 
-    def download_thread(self, app_id):
-        """Execute the complete download and installation process."""
+    def download_thread(self, app_id: int):
+        """Execute the full download and installation pipeline."""
+        def log(msg):
+            self.root.after(0, lambda m=msg: self.log(m))
+
         try:
-            self.root.after(0, lambda: self.log(f"\n{'=' * 60}\nProcessing App ID: {app_id}\n{'=' * 60}"))
+            sep = "=" * 60
+            log(f"\n{sep}\nProcessing App ID: {app_id}\n{sep}")
             self.root.after(0, lambda: self.update_status("Getting game details..."))
 
-            # Fetch game details
-            self.root.after(0, lambda: self.log("\n[1/5] Fetching store details..."))
-            app_details = self.downloader.get_app_details(app_id)
+            log("\n[1/5] Fetching store details...")
+            details = self.downloader.get_app_details(app_id)
+            log(f"Found: {details['name']}" if details else "Store details not available")
 
-            if app_details:
-                game_name = app_details.get('name', 'Unknown')
-                self.root.after(0, lambda: self.log(f"Found: {game_name}"))
-            else:
-                self.root.after(0, lambda: self.log("Store details not available"))
-
-            # Download files
             self.root.after(0, lambda: self.update_status("Downloading files..."))
-            success = self.downloader.download_appid_zip(
-                app_id,
-                log_callback=lambda msg: self.root.after(0, lambda m=msg: self.log(m))
-            )
-
+            success = self.downloader.download_appid_zip(app_id, log_callback=log)
             if not success:
-                self.root.after(0, lambda: messagebox.showerror("Download Failed",
-                                                                "Could not download game data"))
-                self.root.after(0, self.finish_processing)
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Download Failed", "Could not download game data"))
                 return
 
-            self.root.after(0, lambda: self.log("Download complete"))
+            log("Download complete")
             self.root.after(0, lambda: self.update_status("Installing files..."))
+            self.downloader.copy_files_to_steam(log_callback=log)
+            log("Files installed")
 
-            # Copy files to Steam
-            self.downloader.copy_files_to_steam(
-                log_callback=lambda msg: self.root.after(0, lambda m=msg: self.log(m))
-            )
-            self.root.after(0, lambda: self.log("Files installed"))
-
-            # Restart Steam components
             self.root.after(0, lambda: self.update_status("Restarting Steam components..."))
-            self.root.after(0, lambda: self.log("\n[5/5] Restarting Steam components..."))
-
-            self.downloader.close_steam(
-                log_callback=lambda msg: self.root.after(0, lambda m=msg: self.log(m))
-            )
+            log("\n[5/5] Restarting Steam components...")
+            self.downloader.close_steam(log_callback=log)
             time.sleep(1)
-
-            self.downloader.launch_steamtools(
-                log_callback=lambda msg: self.root.after(0, lambda m=msg: self.log(m))
-            )
+            self.downloader.launch_steamtools(log_callback=log)
             time.sleep(2)
+            self.downloader.start_steam(log_callback=log)
 
-            self.downloader.start_steam(
-                log_callback=lambda msg: self.root.after(0, lambda m=msg: self.log(m))
-            )
-
-            # Show success message
             self.root.after(0, lambda: self.update_status("Complete!"))
-            self.root.after(0, lambda: self.log(f"\n{'=' * 60}\n✓ Complete!\n{'=' * 60}"))
-            self.root.after(0, lambda: messagebox.showinfo("Success",
-                                                           "Installation complete!\n\nSteam has been restarted."))
+            log(f"\n{sep}\n✓ Complete!\n{sep}")
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Success", "Installation complete!\n\nSteam has been restarted."))
 
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"Fatal Error: {str(e)}"))
-            self.root.after(0, lambda: messagebox.showerror("Fatal Error",
-                                                            f"A fatal error occurred:\n{str(e)}"))
-
+            log(f"Fatal Error: {e}")
+            self.root.after(0, lambda: messagebox.showerror(
+                "Fatal Error", f"A fatal error occurred:\n{e}"))
         finally:
             self.root.after(0, self.finish_processing)
 
     def finish_processing(self):
-        """Reset GUI to ready state."""
+        """Reset GUI to idle state."""
         self.is_processing = False
+        self.selection_popup = None
         self.progress_bar.stop()
         self.install_btn.configure_state(True)
         self.update_status("Ready")
 
-        # Clear selection popup reference
-        self.selection_popup = None
 
-
-def is_admin():
-    """Check if running with administrator privileges (Windows)."""
+def is_admin() -> bool:
+    """Check if running with administrator privileges (Windows only)."""
     if sys.platform != 'win32':
         return True
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
-    except:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
         return False
 
 
 def run_as_admin():
-    """Re-launch the script with administrator privileges (Windows)."""
-    if sys.platform == 'win32':
-        script = os.path.abspath(sys.argv[0])
-        params = ' '.join(sys.argv[1:])
-        try:
-            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, script, params, 1)
-        except Exception as e:
-            messagebox.showerror("Elevation Failed",
-                                 f"Failed to request administrator privileges: {e}")
-            sys.exit(1)
-        sys.exit(0)
+    """Re-launch the current script with administrator privileges."""
+    script = os.path.abspath(sys.argv[0])
+    params = ' '.join(sys.argv[1:])
+    try:
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, script, params, 1)
+    except Exception as e:
+        messagebox.showerror("Elevation Failed",
+                             f"Failed to request administrator privileges: {e}")
+        sys.exit(1)
+    sys.exit(0)
 
 
 def main():
-    """Main entry point."""
-    if sys.platform == 'win32':
-        if not is_admin():
-            messagebox.showwarning("Administrator Permissions Required",
-                                   "This application requires Administrator permissions to modify Steam files.\n"
-                                   "Restarting with elevated privileges...")
-            run_as_admin()
+    """Application entry point."""
+    if sys.platform == 'win32' and not is_admin():
+        messagebox.showwarning(
+            "Administrator Permissions Required",
+            "This application requires Administrator permissions to modify Steam files.\n"
+            "Restarting with elevated privileges...")
+        run_as_admin()
 
     root = tk.Tk()
-    app = SteamToolsInstaller(root)
+    SteamToolsInstaller(root)
     root.mainloop()
 
 
